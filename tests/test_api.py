@@ -137,3 +137,104 @@ def test_cannot_base_new_derivation_on_invalidated(client):
         "parent_ids": ["R000001"]})
     assert r.status_code == 422
     assert r.get_json()["error"]["code"] == "PARENT_INVALID"
+
+
+# --------------------------------------------------------------------------- #
+# 分支试建 / 整组发布
+# --------------------------------------------------------------------------- #
+def test_branch_snapshot_draft_and_publish_over_http(client):
+    post(client, "/api/records", {"kind": "raw", "payload": {"value": "a"}})
+    post(client, "/api/records",
+         {"kind": "raw", "payload": {"value": "b"}})
+
+    r = client.post("/api/branches", json={})
+    assert r.status_code == 201
+    branch = r.get_json()
+    assert branch["id"] == "B000001"
+    assert [s["record_id"] for s in branch["snapshot"]] == \
+        ["R000001", "R000002"]
+
+    # 草案编号为 D…，与正式编号明确区分
+    d1 = post(client, "/api/branches/B000001/entries",
+              {"kind": "raw", "payload": {"value": "d1"}})
+    assert d1.status_code == 201
+    assert d1.get_json()["draft_id"] == "D000001"
+    d2 = post(client, "/api/branches/B000001/entries", {
+        "kind": "derived", "payload": {"value": "d2"},
+        "parent_refs": ["R000001", "D000001"]})
+    assert d2.get_json()["parent_refs"] == ["R000001", "D000001"]
+
+    # 发布前正式谱系只有两条
+    assert len(client.get("/api/records").get_json()) == 2
+
+    pub = post(client, "/api/branches/B000001/publish",
+               {"operation_id": "pub-1"})
+    assert pub.status_code == 200
+    mapping = pub.get_json()["mapping"]
+    assert [(m["draft_id"], m["record_id"]) for m in mapping] == [
+        ("D000001", "R000003"), ("D000002", "R000004")]
+    r4 = client.get("/api/records/R000004").get_json()
+    assert r4["parent_ids"] == ["R000001", "R000003"]
+    assert r4["status"] == "valid"
+
+
+def test_branch_publish_conflict_is_locatable_and_atomic(client):
+    post(client, "/api/records", {"kind": "raw", "payload": {"value": "a"}})
+    post(client, "/api/branches", {"branch_id": "B1"})
+    post(client, "/api/branches/B1/entries",
+         {"kind": "derived", "payload": {"value": "d"},
+          "parent_refs": ["R000001"]})
+
+    # 创建分支后外部依据被失效
+    post(client, "/api/records/R000001/invalidate", {"operation_id": "kill"})
+    pub = post(client, "/api/branches/B1/publish",
+               {"operation_id": "pub-1"})
+    assert pub.status_code == 409
+    err = pub.get_json()["error"]
+    assert err["code"] == "PUBLISH_CONFLICT"
+    conflict = err["details"]["conflicts"][0]
+    assert conflict == {
+        "entry_id": "D000001", "parent_id": "R000001",
+        "reason": "invalid", "current_status": "invalid"}
+
+    # 主谱系无部分记录，分支仍为草案
+    assert len(client.get("/api/records").get_json()) == 1
+    assert client.get("/api/branches/B1").get_json()["status"] == "draft"
+
+
+def test_branch_publish_replay_and_op_conflict(client):
+    post(client, "/api/records", {"kind": "raw", "payload": {"value": "a"}})
+    post(client, "/api/branches", {"branch_id": "B1"})
+    post(client, "/api/branches/B1/entries",
+         {"kind": "derived", "payload": {"value": "d"},
+          "parent_refs": ["R000001"]})
+    first = post(client, "/api/branches/B1/publish",
+                 {"operation_id": "pub-x"}).get_json()
+    again = post(client, "/api/branches/B1/publish",
+                 {"operation_id": "pub-x"})
+    assert again.status_code == 200
+    body = again.get_json()
+    assert body["replayed"] is True
+    assert body["mapping"] == first["mapping"]
+
+    # 同一操作标识改用于另一分支 -> 冲突
+    post(client, "/api/branches", {"branch_id": "B2"})
+    post(client, "/api/branches/B2/entries",
+         {"kind": "raw", "payload": {"value": "e"}})
+    swapped = post(client, "/api/branches/B2/publish",
+                   {"operation_id": "pub-x"})
+    assert swapped.status_code == 409
+    assert swapped.get_json()["error"]["code"] == "OPERATION_CONFLICT"
+    assert client.get("/api/branches/B2").get_json()["status"] == "draft"
+
+
+def test_branch_entry_404_and_publish_requires_operation_id(client):
+    r = post(client, "/api/branches/B000999/entries",
+             {"kind": "raw", "payload": {}})
+    assert r.status_code == 404
+    assert r.get_json()["error"]["details"]["branch_id"] == "B000999"
+
+    post(client, "/api/branches", {"branch_id": "B1"})
+    r = client.post("/api/branches/B1/publish", json={})
+    assert r.status_code == 400
+    assert r.get_json()["error"]["code"] == "OPERATION_ID_REQUIRED"

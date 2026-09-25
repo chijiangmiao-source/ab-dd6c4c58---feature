@@ -52,6 +52,53 @@
     </form>
   </section>
 
+  <section class="card wide">
+    <h2>分支试建（不影响正式谱系）
+      <button id="branch-refresh" type="button" class="linklike">刷新分支</button>
+    </h2>
+    <form id="branch-create-form" class="inline-form">
+      <label>新建分支（可留空自动编号 B000001…，创建时冻结有效记录快照）
+        <input id="new-branch-id" type="text" placeholder="留空自动分配">
+      </label>
+      <button type="submit">创建试建分支</button>
+    </form>
+    <div class="row">
+      <label>选择工作分支
+        <select id="branch-select"></select>
+      </label>
+    </div>
+    <div id="branch-detail" class="branch-detail"></div>
+    <form id="draft-form" class="inline-form">
+      <div class="row">
+        <label>草案类型
+          <select id="draft-kind">
+            <option value="raw">原始草案</option>
+            <option value="derived">推导草案（依据快照记录或本分支先前草案）</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <label>读数 / 结论内容
+          <input id="draft-value" type="text" placeholder="草案内容，复核通过后才进入正式谱系" required>
+        </label>
+      </div>
+      <div class="row" id="draft-parents-row" hidden>
+        <fieldset>
+          <legend>直接依据（R… = 分支快照中的正式记录；D… = 本分支先前草案）</legend>
+          <div id="draft-parents" class="parents"></div>
+        </fieldset>
+      </div>
+      <button type="submit">追加草案到分支</button>
+    </form>
+    <form id="publish-form" class="inline-form">
+      <label>发布操作标识（幂等键）
+        <input id="publish-op" type="text" placeholder="例如 pub-20260925-001" required>
+      </label>
+      <button type="submit" class="publish">复核通过，整组发布到主谱系</button>
+    </form>
+    <pre id="branch-feedback" class="feedback muted">尚无分支操作</pre>
+  </section>
+
   <section class="card">
     <h2>记录谱系 <button id="refresh" type="button" class="linklike">刷新</button></h2>
     <div id="records" class="records"></div>

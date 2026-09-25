@@ -160,7 +160,9 @@ def run_self_hosted_phase(rep: Report, workdir: Path) -> None:
     try:
         _http_lifecycle(rep, base)
         _http_error_cases(rep, base)
+        _http_branch_workflow(rep, base)
         _http_concurrency(rep, base)
+        _http_branch_publish_race(rep, base)
     finally:
         server.stop()
 
@@ -169,6 +171,7 @@ def run_self_hosted_phase(rep: Report, workdir: Path) -> None:
     server2.start()
     try:
         _http_restart_persistence(rep, base)
+        _http_branch_restart_persistence(rep, base)
     finally:
         server2.stop()
 
@@ -243,6 +246,185 @@ def _http_error_cases(rep: Report, base: str) -> None:
     rep.check("裁决不存在记录：404 可定位",
               r.status_code == 404
               and r.json()["error"]["details"]["record_id"] == "GHOST")
+
+
+def _http_branch_workflow(rep: Report, base: str) -> None:
+    """分支试建 -> 复核 -> 整组发布全链路（真实 HTTP）。"""
+    # 外部有效依据（此时编号承接前面的冒烟，取实际返回值）
+    a = _post(base, "/api/records",
+              {"kind": "raw", "payload": {"value": "branch-base-a"}}).json()
+    b = _post(base, "/api/records",
+              {"kind": "raw", "payload": {"value": "branch-base-b"}}).json()
+    before_count = len(requests.get(f"{base}/api/records").json())
+
+    br = _post(base, "/api/branches", {"branch_id": "BR-1"})
+    rep.check("创建分支返回 201", br.status_code == 201, br.text[:200])
+    branch = br.json()
+    snap_ids = {s["record_id"] for s in branch["snapshot"]}
+    rep.check("分支保存当时有效记录的稳定快照",
+              a["id"] in snap_ids and b["id"] in snap_ids)
+
+    d1 = _post(base, "/api/branches/BR-1/entries",
+               {"kind": "raw", "payload": {"value": "draft-1"}}).json()
+    d2 = _post(base, "/api/branches/BR-1/entries", {
+        "kind": "derived", "payload": {"value": "draft-2"},
+        "parent_refs": [a["id"], d1["draft_id"]]}).json()
+    rep.check("草案编号与正式编号明确区分（D… 且无正式编号）",
+              d1["draft_id"] == "D000001" and d1["record_id"] is None
+              and d2["draft_id"] == "D000002"
+              and d2["parent_refs"] == [a["id"], "D000001"])
+    rep.check("草案不写入正式谱系",
+              len(requests.get(f"{base}/api/records").json()) == before_count)
+
+    # 快照外的记录不能引用
+    ghost = _post(base, "/api/branches/BR-1/entries", {
+        "kind": "derived", "payload": {"value": "x"},
+        "parent_refs": ["R000999"]})
+    rep.check("分支引用快照外记录：拒绝并可定位",
+              ghost.status_code == 422
+              and ghost.json()["error"]["code"] == "PARENT_NOT_FOUND"
+              and ghost.json()["error"]["details"]
+              ["missing_parent_ids"] == ["R000999"])
+
+    # 第二个分支：依据 a 创建草案后，让 a 失效，发布必须整组冲突
+    _post(base, "/api/branches", {"branch_id": "BR-STALE"})
+    _post(base, "/api/branches/BR-STALE/entries", {
+        "kind": "derived", "payload": {"value": "stale"},
+        "parent_refs": [a["id"]]})
+    inv = _post(base, f"/api/records/{a['id']}/invalidate",
+                {"operation_id": "verify-branch-kill-a"}).json()
+    rep.check("失效裁决按既有链路级联（含已发布记录）",
+              a["id"] in {x["id"] for x in inv["cascade"]})
+
+    bad_pub = _post(base, "/api/branches/BR-STALE/publish",
+                    {"operation_id": "verify-pub-stale"})
+    rep.check("外部依据失效：整次发布 409 且冲突可定位",
+              bad_pub.status_code == 409
+              and bad_pub.json()["error"]["code"] == "PUBLISH_CONFLICT"
+              and bad_pub.json()["error"]["details"]["conflicts"] == [{
+                  "entry_id": "D000001", "parent_id": a["id"],
+                  "reason": "invalid", "current_status": "invalid"}],
+              bad_pub.text[:300])
+    rep.check("失败发布在主谱系不产生部分记录",
+              len(requests.get(f"{base}/api/records").json()) == before_count)
+    rep.check("冲突后分支仍是草案",
+              requests.get(f"{base}/api/branches/BR-STALE").json()
+              ["status"] == "draft")
+
+    # BR-1 的草案依赖 a（已失效）→ 同样整组冲突
+    bad_pub2 = _post(base, "/api/branches/BR-1/publish",
+                     {"operation_id": "verify-pub-br1"})
+    rep.check("BR-1 同样因失效依据被整组拒绝",
+              bad_pub2.status_code == 409
+              and bad_pub2.json()["error"]["code"] == "PUBLISH_CONFLICT")
+
+    # 新建一个只引用仍有效依据 b 的分支，发布成功并按序给正式编号
+    _post(base, "/api/branches", {"branch_id": "BR-OK"})
+    e1 = _post(base, "/api/branches/BR-OK/entries",
+               {"kind": "raw", "payload": {"value": "ok-draft-1"}}).json()
+    e2 = _post(base, "/api/branches/BR-OK/entries", {
+        "kind": "derived", "payload": {"value": "ok-draft-2"},
+        "parent_refs": [b["id"], "D000001"]}).json()
+    pub = _post(base, "/api/branches/BR-OK/publish",
+                {"operation_id": "verify-pub-ok"})
+    rep.check("复核通过：整组发布 200", pub.status_code == 200, pub.text[:200])
+    mapping = pub.json()["mapping"]
+    formal = {m["draft_id"]: m["record_id"] for m in mapping}
+    expect = {e1["draft_id"], e2["draft_id"]}
+    rep.check("发布按分支顺序分配正式编号并给出映射",
+              set(formal) == expect and len(set(formal.values())) == 2
+              and [m["draft_id"] for m in mapping] == ["D000001", "D000002"])
+    f2 = requests.get(
+        f"{base}/api/records/{formal['D000002']}").json()
+    rep.check("发布建立全部引用（外部依据 + 同分支先前条目）",
+              f2["parent_ids"] == [b["id"], formal["D000001"]]
+              and f2["status"] == "valid",
+              f"f2={f2}")
+
+    # 同标识重传：返回首次编号映射
+    replay = _post(base, "/api/branches/BR-OK/publish",
+                   {"operation_id": "verify-pub-ok"}).json()
+    rep.check("相同发布标识重传返回首次编号映射",
+              replay.get("replayed") is True
+              and replay["mapping"] == mapping)
+
+    # 标识改换分支 -> 冲突
+    swap = _post(base, "/api/branches/BR-STALE/publish",
+                 {"operation_id": "verify-pub-ok"})
+    rep.check("发布标识改换分支 -> 409 OPERATION_CONFLICT",
+              swap.status_code == 409
+              and swap.json()["error"]["code"] == "OPERATION_CONFLICT"
+              and swap.json()["error"]["details"]
+              ["original_target"] == "BR-OK")
+
+    # 页面可经真实接口观察到分支与发布后的正式谱系
+    listed = {x["id"]: x for x in
+              requests.get(f"{base}/api/branches").json()}
+    rep.check("分支列表可观察：BR-OK 已发布、BR-STALE 仍草案",
+              listed["BR-OK"]["status"] == "published"
+              and listed["BR-STALE"]["status"] == "draft"
+              and listed["BR-OK"]["entry_count"] == 2)
+    ok_detail = requests.get(f"{base}/api/branches/BR-OK").json()
+    rep.check("分支详情含正式编号映射",
+              {e["record_id"] for e in ok_detail["entries"]}
+              == set(formal.values()))
+
+
+def _http_branch_publish_race(rep: Report, base: str) -> None:
+    """分支发布与失效裁决跨进程并发竞争：不得留下对失效/过期依据的有效依赖。"""
+    pivot = _post(base, "/api/records",
+                  {"kind": "raw", "payload": {"value": "branch-pivot"}}
+                  ).json()["id"]
+    for i in range(10):
+        _post(base, "/api/branches", {"branch_id": f"BR-RACE-{i}"})
+        _post(base, f"/api/branches/BR-RACE-{i}/entries", {
+            "kind": "derived", "payload": {"value": f"r{i}"},
+            "parent_refs": [pivot]})
+
+    def one(i: int) -> None:
+        s = requests.Session()
+        try:
+            if i % 4 == 0:
+                s.post(f"{base}/api/records/{pivot}/invalidate",
+                       json={"operation_id": f"verify-branch-inv-{i}"},
+                       timeout=15)
+            else:
+                s.post(f"{base}/api/branches/BR-RACE-{i}/publish",
+                       json={"operation_id": f"verify-branch-pub-{i}"},
+                       timeout=15)
+        except requests.RequestException as exc:
+            raise AssertionError(str(exc)) from exc
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        list(pool.map(one, range(10)))
+
+    records = requests.get(f"{base}/api/records").json()
+    by_id = {r["id"]: r for r in records}
+    bad = [r["id"] for r in records
+           if r["status"] == "valid"
+           and any(by_id.get(p, {}).get("status") == "invalid"
+                   for p in r["parent_ids"])]
+    rep.check("分支竞争发布后不存在有效记录依赖失效/过期依据", not bad,
+              f"违规记录：{bad}")
+    if by_id[pivot]["status"] == "invalid":
+        children = [r for r in records if pivot in r["parent_ids"]]
+        rep.check("竞争中失效闭包完整：pivot 下游全部失效",
+                  all(c["status"] == "invalid" for c in children),
+                  f"children={len(children)}")
+
+
+def _http_branch_restart_persistence(rep: Report, base: str) -> None:
+    branch = requests.get(f"{base}/api/branches/BR-OK").json()
+    rep.check("重启后分支状态 / 快照 / 编号映射仍可查",
+              branch["status"] == "published"
+              and all(e["record_id"] for e in branch["entries"])
+              and any(s["record_id"] for s in branch["snapshot"]))
+    replay = _post(base, "/api/branches/BR-OK/publish",
+                   {"operation_id": "verify-pub-ok"}).json()
+    rep.check("重启后发布操作重放返回首次编号映射",
+              replay.get("replayed") is True
+              and {m["draft_id"] for m in replay["mapping"]} ==
+              {"D000001", "D000002"})
 
 
 def _http_concurrency(rep: Report, base: str) -> None:

@@ -38,6 +38,7 @@ main {
   border-radius: 10px;
   padding: 1rem 1.25rem;
 }
+.card.wide { grid-column: 1 / -1; }
 .card h2 { margin: 0 0 .75rem; font-size: 1.05rem; display: flex; justify-content: space-between; align-items: center; }
 
 label { display: block; font-size: .85rem; color: var(--muted); margin-bottom: .6rem; }
@@ -85,3 +86,10 @@ button.linklike { background: none; color: var(--accent); font-weight: 400; padd
 .muted { color: var(--muted); }
 .error-text { color: var(--danger); }
 .ok-text { color: var(--ok); }
+
+.branch-head { display: flex; align-items: center; gap: .6rem; flex-wrap: wrap; margin-bottom: .5rem; }
+.snapshot-box { border: 1px dashed var(--border); border-radius: 6px; padding: .4rem .6rem; margin-bottom: .6rem; }
+.snapshot-box summary { cursor: pointer; color: var(--muted); font-size: .82rem; }
+.draft-pid { font-family: ui-monospace, Menlo, Consolas, monospace; color: #f2c14e; font-weight: 700; }
+.draft-record { border-style: dashed; }
+button.publish { background: var(--ok); color: #08221a; }
