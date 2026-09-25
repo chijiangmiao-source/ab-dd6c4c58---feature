@@ -8,7 +8,9 @@
   2. 构建检查：compileall 语法构建 + 应用可导入；
   3. API/HTTP 冒烟：拉起真实 gunicorn 服务（4 worker，跨进程竞争），
      经 HTTP 复现稳定编号、级联失效、操作重放、同标识换目标冲突、
-     可定位错误反馈、并发竞争不变量，以及重启后谱系/失效状态/操作重放；
+     可定位错误反馈、并发竞争不变量，以及分支试建（快照/草案编号）、
+     整组发布（编号映射、发布冲突回滚、发布 vs 失效竞争），
+     以及重启后谱系/失效状态/操作重放/分支发布映射；
   4. 可选：若设置 VERIFY_TARGET_URL，则对已运行的服务（如 compose 中的
      web 服务）追加一次真实 HTTP 冒烟。
 
@@ -161,6 +163,8 @@ def run_self_hosted_phase(rep: Report, workdir: Path) -> None:
         _http_lifecycle(rep, base)
         _http_error_cases(rep, base)
         _http_concurrency(rep, base)
+        _http_branch_phase(rep, base)
+        _http_branch_race(rep, base)
     finally:
         server.stop()
 
@@ -169,6 +173,7 @@ def run_self_hosted_phase(rep: Report, workdir: Path) -> None:
     server2.start()
     try:
         _http_restart_persistence(rep, base)
+        _http_restart_branch_persistence(rep, base)
     finally:
         server2.stop()
 
@@ -293,6 +298,113 @@ def _http_concurrency(rep: Report, base: str) -> None:
               f"pivot={pivot}, children={len(children)}")
 
 
+def _http_branch_phase(rep: Report, base: str) -> None:
+    """分支试建 + 整组发布全链路（真实 HTTP）。"""
+    basis = _post(base, "/api/records",
+                  {"kind": "raw", "payload": {"value": "branch-basis"}}).json()
+    branch = _post(base, "/api/branches", {}).json()
+    bid = branch["id"]
+    rep.check("分支创建即保存当时有效记录的稳定快照",
+              basis["id"] in branch["snapshot_record_ids"]
+              and branch["status"] == "open")
+
+    e1 = _post(base, f"/api/branches/{bid}/entries",
+               {"kind": "raw", "payload": {"value": "trial-raw"}}).json()
+    e2 = _post(base, f"/api/branches/{bid}/entries", {
+        "kind": "derived", "payload": {"value": "trial-derived"},
+        "parent_refs": [basis["id"], e1["id"]]}).json()
+    rep.check("草案编号（D…）与正式编号区分，可引用快照记录与本分支先前条目",
+              e1["id"].startswith("D") and e2["id"].startswith("D")
+              and [p["id"] for p in e2["parents"]] == [basis["id"], e1["id"]])
+
+    official_ids = {r["id"] for r in requests.get(f"{base}/api/records").json()}
+    rep.check("草案条目不进入正式谱系",
+              e1["id"] not in official_ids and e2["id"] not in official_ids)
+
+    pub = _post(base, f"/api/branches/{bid}/publish",
+                {"operation_id": "verify-pub-1"}).json()
+    new_ids = [pub["mapping"][e1["id"]], pub["mapping"][e2["id"]]]
+    records = {r["id"]: r for r in requests.get(f"{base}/api/records").json()}
+    rep.check("发布按分支顺序分配正式编号并建立全部引用",
+              pub["result"] == "completed"
+              and new_ids == sorted(new_ids)
+              and all(records[i]["status"] == "valid" for i in new_ids)
+              and records[new_ids[1]]["parent_ids"] ==
+                  [basis["id"], new_ids[0]])
+
+    replay = _post(base, f"/api/branches/{bid}/publish",
+                   {"operation_id": "verify-pub-1"}).json()
+    rep.check("相同发布操作标识重传返回首次编号映射",
+              replay.get("replayed") is True
+              and replay["mapping"] == pub["mapping"])
+
+    other = _post(base, "/api/branches", {}).json()
+    conflict = _post(base, f"/api/branches/{other['id']}/publish",
+                     {"operation_id": "verify-pub-1"})
+    rep.check("同一发布标识改换分支 -> 409 冲突",
+              conflict.status_code == 409
+              and conflict.json()["error"]["code"] == "OPERATION_CONFLICT")
+
+    # 外部依据在分支创建后失效 -> 整次发布可定位冲突，主谱系无部分记录
+    doomed = _post(base, "/api/records",
+                   {"kind": "raw", "payload": {"value": "doomed"}}).json()
+    b2 = _post(base, "/api/branches", {}).json()
+    _post(base, f"/api/branches/{b2['id']}/entries", {
+        "kind": "derived", "payload": {"value": "uses-doomed"},
+        "parent_refs": [doomed["id"]]})
+    _post(base, f"/api/records/{doomed['id']}/invalidate",
+          {"operation_id": "verify-op-doom"})
+    count_before = len(requests.get(f"{base}/api/records").json())
+    c2 = _post(base, f"/api/branches/{b2['id']}/publish",
+               {"operation_id": "verify-pub-2"})
+    err = c2.json().get("error", {})
+    count_after = len(requests.get(f"{base}/api/records").json())
+    rep.check("外部依据失效 -> 整次发布可定位冲突且主谱系不产生部分记录",
+              c2.status_code == 409
+              and err.get("code") == "PUBLISH_CONFLICT"
+              and err.get("details", {}).get("invalid_basis_ids") == [doomed["id"]]
+              and count_before == count_after)
+
+
+def _http_branch_race(rep: Report, base: str) -> None:
+    """分支发布 vs 失效裁决 跨进程并发竞争。"""
+    pivot = _post(base, "/api/records",
+                  {"kind": "raw", "payload": {"value": "race-pivot"}}).json()["id"]
+    bids = []
+    for i in range(3):
+        b = _post(base, "/api/branches", {}).json()
+        _post(base, f"/api/branches/{b['id']}/entries", {
+            "kind": "derived", "payload": {"value": f"brace-{i}"},
+            "parent_refs": [pivot]})
+        bids.append(b["id"])
+    errors: list[str] = []
+
+    def one(i: int) -> None:
+        s = requests.Session()
+        try:
+            if i % 2 == 0:
+                s.post(f"{base}/api/branches/{bids[(i // 2) % 3]}/publish",
+                       json={"operation_id": f"verify-pub-race-{i}"}, timeout=15)
+            else:
+                s.post(f"{base}/api/records/{pivot}/invalidate",
+                       json={"operation_id": "verify-op-brace"}, timeout=15)
+        except requests.RequestException as exc:
+            errors.append(str(exc))
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        list(pool.map(one, range(36)))
+    rep.check("分支发布竞争期间无传输层错误", not errors, str(errors))
+
+    records = requests.get(f"{base}/api/records").json()
+    by_id = {r["id"]: r for r in records}
+    bad = [r["id"] for r in records
+           if r["status"] == "valid"
+           and any(by_id.get(p, {}).get("status") == "invalid"
+                   for p in r["parent_ids"])]
+    rep.check("分支竞争后不存在有效正式记录依赖失效或过期快照中的依据",
+              not bad, f"违规记录：{bad}" if bad else "")
+
+
 def _http_restart_persistence(rep: Report, base: str) -> None:
     records = {r["id"]: r for r in requests.get(f"{base}/api/records").json()}
     ok = (records["R000001"]["status"] == "invalid"
@@ -310,6 +422,28 @@ def _http_restart_persistence(rep: Report, base: str) -> None:
 
     opq = requests.get(f"{base}/api/operations/verify-op-cascade").json()
     rep.check("操作结果可按标识查询", opq["result"] == "completed")
+
+
+def _http_restart_branch_persistence(rep: Report, base: str) -> None:
+    branches = requests.get(f"{base}/api/branches").json()
+    published = [b for b in branches if b["status"] == "published"]
+    ok = bool(published)
+    detail = {}
+    if ok:
+        detail = requests.get(
+            f"{base}/api/branches/{published[0]['id']}").json()
+        op = requests.get(
+            f"{base}/api/operations/{published[0]['published_op']}").json()
+        ok = (all(e["published_record_id"] for e in detail["entries"])
+              and op.get("mapping") == {e["id"]: e["published_record_id"]
+                                        for e in detail["entries"]})
+    rep.check("重启后分支状态与发布编号映射仍可查询", ok)
+
+    if ok:
+        replay = _post(base, f"/api/branches/{detail['id']}/publish",
+                       {"operation_id": published[0]["published_op"]}).json()
+        rep.check("重启后发布标识重放返回首次编号映射",
+                  replay.get("replayed") is True)
 
 
 # --------------------------------------------------------------------------- #

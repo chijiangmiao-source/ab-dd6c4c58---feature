@@ -9,7 +9,7 @@
 <body>
 <header>
   <h1>低温探测器标定谱系</h1>
-  <p class="sub">原始读数 · 推导标定 · 级联失效裁决（编号与失效状态经真实接口持久化）</p>
+  <p class="sub">原始读数 · 推导标定 · 级联失效裁决 · 分支试建与整组发布（编号与失效状态经真实接口持久化）</p>
 </header>
 
 <main>
@@ -53,7 +53,57 @@
   </section>
 
   <section class="card">
-    <h2>记录谱系 <button id="refresh" type="button" class="linklike">刷新</button></h2>
+    <h2>分支试建（草案，不影响正式谱系）
+      <button id="branch-create" type="button">新建分支</button>
+    </h2>
+    <p class="muted hint">分支保存创建时刻可引用有效记录的稳定快照；草案条目使用
+      <span class="pid draft">D…</span> 草案编号，发布后才获得
+      <span class="pid">R…</span> 正式编号。</p>
+    <div id="branches" class="branches"></div>
+  </section>
+
+  <section class="card" id="branch-detail-card" hidden>
+    <h2>分支详情 <span id="branch-detail-id" class="pid"></span>
+      <span id="branch-detail-status"></span></h2>
+    <div id="branch-snapshot" class="snapshot"></div>
+    <h3 class="subhead">草案条目（按分支顺序）</h3>
+    <div id="branch-entries" class="records"></div>
+
+    <form id="entry-form" class="inline-form">
+      <h3 class="subhead">追加草案条目</h3>
+      <div class="row">
+        <label>类型
+          <select id="entry-kind">
+            <option value="raw">原始记录（传感器原始读数）</option>
+            <option value="derived">推导记录（依赖快照记录或本分支先前条目）</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <label>读数 / 结论内容
+          <input id="entry-value" type="text" placeholder="例如 detector-B @ 4K = 3.1 mV" required>
+        </label>
+      </div>
+      <div class="row" id="entry-parents-row" hidden>
+        <fieldset>
+          <legend>直接依据（快照中的正式记录 R… 或本分支草案 D…，可多选）</legend>
+          <div id="entry-parents" class="parents"></div>
+        </fieldset>
+      </div>
+      <button type="submit">追加草案条目</button>
+    </form>
+
+    <form id="publish-form" class="inline-form">
+      <h3 class="subhead">复核完成，整组发布到主谱系</h3>
+      <label>发布操作标识（幂等键）
+        <input id="pub-op" type="text" placeholder="例如 pub-20260925-001" required>
+      </label>
+      <button type="submit" class="danger">发布整组草案</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>记录谱系（正式） <button id="refresh" type="button" class="linklike">刷新</button></h2>
     <div id="records" class="records"></div>
   </section>
 

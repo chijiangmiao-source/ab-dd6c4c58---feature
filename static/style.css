@@ -85,3 +85,24 @@ button.linklike { background: none; color: var(--accent); font-weight: 400; padd
 .muted { color: var(--muted); }
 .error-text { color: var(--danger); }
 .ok-text { color: var(--ok); }
+
+/* 分支试建：草案编号（D…）与正式编号（R…）清晰区分 */
+.hint { font-size: .8rem; margin: 0 0 .6rem; }
+.subhead { font-size: .9rem; color: var(--muted); margin: .9rem 0 .4rem; }
+.branches { display: grid; gap: .4rem; }
+.branch-item {
+  display: flex; align-items: center; gap: .6rem; flex-wrap: wrap;
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: .5rem .7rem; background: var(--panel-2); cursor: pointer;
+}
+.branch-item:hover { border-color: var(--accent); }
+.branch-item.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.branch-item .id { font-family: ui-monospace, Menlo, Consolas, monospace; font-weight: 700; }
+.badge.draft { background: rgba(255,196,66,.16); color: #ffd166; }
+.badge.published { background: rgba(90,169,255,.18); color: var(--accent); }
+.badge.official { background: rgba(90,169,255,.14); color: var(--accent); }
+.pid.draft, .draft-id { color: #ffd166; }
+.draft-record { border-style: dashed; }
+.snapshot { margin-bottom: .4rem; }
+.snapshot .meta { color: var(--muted); font-size: .8rem; }
+.snapshot .pid { margin-right: .2rem; }

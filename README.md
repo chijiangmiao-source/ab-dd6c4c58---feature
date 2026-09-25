@@ -2,6 +2,7 @@
 
 一条原始读数失真时，需要立即复核并失效全部受影响的下游结论，而不只是标记源记录。
 本服务管理低温探测器的**原始 / 推导标定记录**、它们的**依据谱系**以及**级联失效裁决**。
+工程师可先在**分支**中试建若干草案记录，复核完成后将整组结果**一次发布**到主谱系。
 
 ## 业务规则
 
@@ -18,6 +19,23 @@
   （所有写事务经 `BEGIN IMMEDIATE` + 进程内锁串行化，校验与写入在同一事务）。
 - **重启持久化**：谱系、失效状态和操作重放结果存于 SQLite，重启后仍可查询。
 
+## 分支试建与整组发布
+
+- `POST /api/branches` 创建分支时，服务保存**当时全部可引用有效记录及其直接依据
+  的稳定快照**；分支不影响当前有效谱系。
+- 分支内可试建原始 / 推导**草案条目**（`D000001…` 草案编号，页面与正式编号
+  `R…` 清晰区分）：推导既可引用**快照中的记录**，也可引用**本分支先前条目**；
+  草案不进入正式谱系。
+- `POST /api/branches/<id>/publish`（请求体含 `operation_id`）在**同一持久化提交**
+  内重新核对全部外部依据**仍有效**且**直接依据未在分支创建后发生变化**；
+  条件满足才**按分支顺序分配正式编号**并建立全部引用（分支内引用映射为正式编号）。
+- 任一外部依据失效或其谱系已变化 → 整次发布返回 `409 PUBLISH_CONFLICT`
+  （`details` 含失效/过期依据与受影响草案条目），**主谱系不产生部分记录**。
+- 发布**幂等**：相同发布操作标识重传返回首次编号映射；标识改换分支 →
+  `409 OPERATION_CONFLICT`（与失效裁决共用同一标识空间）。
+- 两个分支竞争发布、或发布与失效裁决竞争时，写事务串行化保证：最终不存在
+  有效正式记录依赖已失效或过期快照中的依据。
+
 ## 接口
 
 | 方法 | 路径 | 说明 |
@@ -28,7 +46,12 @@
 | GET | `/api/records` | 全部记录（编号/有效性/直接依据） |
 | GET | `/api/records/<id>` | 单条记录 |
 | POST | `/api/records/<id>/invalidate` | 失效裁决（请求体含 `operation_id`） |
-| GET | `/api/operations/<operation_id>` | 查询裁决首次结果 |
+| GET | `/api/operations/<operation_id>` | 查询裁决/发布首次结果 |
+| POST | `/api/branches` | 创建分支（保存有效记录稳定快照） |
+| GET | `/api/branches` | 全部分支（状态/快照规模/草案数） |
+| GET | `/api/branches/<id>` | 分支详情（快照 + 草案条目） |
+| POST | `/api/branches/<id>/entries` | 追加草案条目（`parent_refs` 可含 `R…`/`D…`） |
+| POST | `/api/branches/<id>/publish` | 整组发布（请求体含 `operation_id`） |
 
 错误响应形如：
 
@@ -39,7 +62,9 @@
 
 错误码：`PARENT_NOT_FOUND` / `SELF_REFERENCE` / `CYCLE_DETECTED` /
 `PARENT_INVALID` / `RECORD_NOT_FOUND` / `RECORD_ALREADY_INVALID` /
-`OPERATION_CONFLICT` / `OPERATION_ID_REQUIRED` 等。
+`OPERATION_CONFLICT` / `OPERATION_ID_REQUIRED` / `BRANCH_NOT_FOUND` /
+`BRANCH_CLOSED` / `BRANCH_ALREADY_PUBLISHED` / `BASIS_NOT_IN_SNAPSHOT` /
+`ENTRY_NOT_IN_BRANCH` / `PUBLISH_CONFLICT` 等。
 
 ## 快速开始（宿主机）
 
@@ -79,14 +104,16 @@ docker compose --profile verify run --rm verify
 ## 测试
 
 ```bash
-.venv/bin/pytest -q          # 21 个单元/接口用例
+.venv/bin/pytest -q          # 45 个单元/接口用例
 ./verify                     # 一次性验收（含跨进程并发与重启）
 ```
 
 ## 关键实现位置
 
 - `app/store.py`：单事务级联失效（递归 CTE 求下游闭包）、操作标识幂等/冲突、
-  四类引用校验、`BEGIN IMMEDIATE` 串行化、完整性自检。
+  四类引用校验、`BEGIN IMMEDIATE` 串行化、完整性自检；分支快照、草案条目
+  引用解析与整组发布（同事务核对 + 按序分配正式编号 + 冲突整体回滚）。
 - `app/server.py`：页面、健康端点与 JSON API、统一可定位错误体。
 - `scripts/verify.py` / `verify`：一次性验收服务。
-- `tests/`：存储层与 HTTP 接口用例（含 60+ 线程并发竞争与重启持久化）。
+- `tests/`：存储层与 HTTP 接口用例（含 60+ 线程并发竞争、分支发布竞争与
+  重启持久化）。
